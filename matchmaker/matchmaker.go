@@ -32,7 +32,10 @@ type Room struct {
 	OwnerID   string
 	PlayerIDs []string
 	Port      int
+	MaxPlayers int
 	CreatedAt time.Time
+	WaitUntil time.Time
+	Started   bool
 	Process   *exec.Cmd
 }
 
@@ -42,6 +45,7 @@ type Matchmaker struct {
 	rooms     map[string]*Room
 	queue     []string
 	queueSet  map[string]bool
+	nextRoomID int64
 	nextPort  int
 	freePorts []int
 }
@@ -52,6 +56,7 @@ func New() *Matchmaker {
 		rooms:     make(map[string]*Room),
 		queue:     make([]string, 0),
 		queueSet:  make(map[string]bool),
+		nextRoomID: 1,
 		nextPort:  18000,
 		freePorts: make([]int, 0),
 	}
@@ -73,6 +78,14 @@ func (m *Matchmaker) Unregister(id string) {
 	m.removeFromQueueLocked(id)
 	c, ok := m.clients[id]
 	if !ok {
+		return
+	}
+	if c.State == StateWaiting && c.RoomID != "" {
+		_ = m.cancelFromWaitingRoomLocked(id)
+		delete(m.clients, id)
+		log.Printf("[matchmaker] client %s ws closed (was waiting in room %s)", id, c.RoomID)
+		m.tryMatchLocked()
+		m.broadcastStatusLocked()
 		return
 	}
 	// 已匹配进房后：不在「第一个断线」时拆房；仅当房间内已无任何仍在匹配服上登记为 StateInRoom 的玩家时回收专服。
@@ -105,6 +118,26 @@ func (m *Matchmaker) RequestMatch(id string) {
 		return
 	}
 
+	// 已在等待房内：仅回当前房间状态
+	if c.State == StateWaiting && c.RoomID != "" {
+		if room, ok := m.rooms[c.RoomID]; ok && !room.Started {
+			m.notifyRoomWaitingLocked(room)
+		}
+		return
+	}
+
+	// 优先加入已存在的“等待开局房”（最多 4 人，10 秒内）
+	if room := m.findJoinableWaitingRoomLocked(); room != nil {
+		m.attachWaitingClientToRoomLocked(c, room)
+		m.notifyRoomWaitingLocked(room)
+		// 房满立即开局
+		if len(room.PlayerIDs) >= room.MaxPlayers {
+			m.startRoomLocked(room)
+		}
+		m.broadcastStatusLocked()
+		return
+	}
+
 	if m.queueSet[id] {
 		log.Printf("[matchmaker] client %s already in queue, skip", id)
 		return
@@ -123,9 +156,20 @@ func (m *Matchmaker) CancelMatch(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.cancelFromWaitingRoomLocked(id) {
+		if c, ok := m.clients[id]; ok {
+			safeSend(c.Send, protocol.CancelMatchOKMsg())
+		}
+		log.Printf("[matchmaker] client %s cancelled waiting-room match", id)
+		m.tryMatchLocked()
+		m.broadcastStatusLocked()
+		return
+	}
+
 	m.removeFromQueueLocked(id)
 	if c, ok := m.clients[id]; ok && c.State == StateWaiting {
 		c.State = StateIdle
+		c.RoomID = ""
 	}
 	if c, ok := m.clients[id]; ok {
 		safeSend(c.Send, protocol.CancelMatchOKMsg())
@@ -184,54 +228,209 @@ func (m *Matchmaker) DissolveRoom(id string) {
 
 // --- internal ---
 
-// tryMatchLocked 优先凑 4 人，不够则 3 人，再不够则 2 人
+const (
+	roomMinPlayers     = 2
+	roomMaxPlayers     = 4
+	roomWaitBeforeStart = 10 * time.Second
+)
+
+// tryMatchLocked 规则：
+// 1) 先把排队玩家尽量塞进“已创建但未开局”的等待房（优先填满）。
+// 2) 若没有等待房且队列 >=2，创建新等待房（先拉 2 人进房，开始 10 秒倒计时）。
+// 3) 等待房满 4 人立即开局；否则超时后开局（至少 2 人）。
 func (m *Matchmaker) tryMatchLocked() {
+	// 先填充现有等待房
 	for {
-		qLen := m.validQueueLenLocked()
-		if qLen < 2 {
+		room := m.findJoinableWaitingRoomLocked()
+		if room == nil {
 			break
 		}
-
-		var take int
-		switch {
-		case qLen >= 4:
-			take = 4
-		case qLen >= 3:
-			take = 3
-		default:
-			take = 2
-		}
-
-		ids := m.dequeueNLocked(take)
-		if len(ids) < 2 {
+		id, ok := m.dequeueOneWaitingLocked()
+		if !ok {
 			break
 		}
-
-		port := m.allocPortLocked()
-		roomID := fmt.Sprintf("room-%d", port)
-
-		room := &Room{
-			ID:        roomID,
-			OwnerID:   ids[0],
-			PlayerIDs: ids,
-			Port:      port,
-			CreatedAt: time.Now(),
+		c, exists := m.clients[id]
+		if !exists || c.State != StateWaiting {
+			continue
 		}
-		m.rooms[roomID] = room
-
-		matchMsg := protocol.MatchSuccessMsg(port, len(ids))
-		for _, pid := range ids {
-			if c, ok := m.clients[pid]; ok {
-				c.State = StateInRoom
-				c.RoomID = roomID
-				safeSend(c.Send, matchMsg)
-			}
+		m.attachWaitingClientToRoomLocked(c, room)
+		m.notifyRoomWaitingLocked(room)
+		if len(room.PlayerIDs) >= room.MaxPlayers {
+			m.startRoomLocked(room)
 		}
-
-		go m.startDedicatedServer(room)
-
-		log.Printf("[matchmaker] matched %v -> room=%s port=%d (%d players)", ids, roomID, port, len(ids))
 	}
+
+	// 没有可填充等待房时，按 2 人起房
+	for m.findJoinableWaitingRoomLocked() == nil {
+		ids := m.dequeueNLocked(roomMinPlayers)
+		if len(ids) < roomMinPlayers {
+			break
+		}
+		room := m.createWaitingRoomLocked(ids)
+		m.notifyRoomWaitingLocked(room)
+	}
+}
+
+func (m *Matchmaker) createWaitingRoomLocked(ids []string) *Room {
+	roomID := fmt.Sprintf("room-wait-%d", m.nextRoomID)
+	m.nextRoomID++
+	now := time.Now()
+	room := &Room{
+		ID:         roomID,
+		OwnerID:    ids[0],
+		PlayerIDs:  append([]string{}, ids...),
+		MaxPlayers: roomMaxPlayers,
+		CreatedAt:  now,
+		WaitUntil:  now.Add(roomWaitBeforeStart),
+		Started:    false,
+	}
+	m.rooms[roomID] = room
+	for _, pid := range ids {
+		if c, ok := m.clients[pid]; ok {
+			c.State = StateWaiting
+			c.RoomID = roomID
+		}
+	}
+	go m.waitAndStartRoom(roomID, room.WaitUntil)
+	log.Printf("[matchmaker] created waiting room=%s players=%v wait=%s", roomID, ids, roomWaitBeforeStart)
+	return room
+}
+
+func (m *Matchmaker) waitAndStartRoom(roomID string, deadline time.Time) {
+	sleep := time.Until(deadline)
+	if sleep > 0 {
+		time.Sleep(sleep)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	room, ok := m.rooms[roomID]
+	if !ok || room.Started {
+		return
+	}
+	if !room.WaitUntil.Equal(deadline) {
+		return
+	}
+	m.startRoomLocked(room)
+	m.broadcastStatusLocked()
+}
+
+func (m *Matchmaker) startRoomLocked(room *Room) {
+	if room == nil || room.Started {
+		return
+	}
+	if len(room.PlayerIDs) < roomMinPlayers {
+		return
+	}
+	port := m.allocPortLocked()
+	room.Port = port
+	room.Started = true
+	room.WaitUntil = time.Now()
+	matchMsg := protocol.MatchSuccessMsg(port, len(room.PlayerIDs))
+	for _, pid := range room.PlayerIDs {
+		if c, ok := m.clients[pid]; ok {
+			c.State = StateInRoom
+			c.RoomID = room.ID
+			safeSend(c.Send, matchMsg)
+		}
+	}
+	go m.startDedicatedServer(room)
+	log.Printf("[matchmaker] start room=%s port=%d players=%v", room.ID, port, room.PlayerIDs)
+}
+
+func (m *Matchmaker) notifyRoomWaitingLocked(room *Room) {
+	if room == nil || room.Started {
+		return
+	}
+	waitSec := int(time.Until(room.WaitUntil).Seconds())
+	if waitSec < 0 {
+		waitSec = 0
+	}
+	ready := len(room.PlayerIDs) >= roomMinPlayers
+	msg := protocol.RoomWaitingMsg(room.ID, len(room.PlayerIDs), room.MaxPlayers, waitSec, ready)
+	for _, pid := range room.PlayerIDs {
+		if c, ok := m.clients[pid]; ok {
+			safeSend(c.Send, msg)
+		}
+	}
+}
+
+func (m *Matchmaker) findJoinableWaitingRoomLocked() *Room {
+	var best *Room
+	for _, room := range m.rooms {
+		if room == nil || room.Started {
+			continue
+		}
+		if len(room.PlayerIDs) >= room.MaxPlayers {
+			continue
+		}
+		// 优先最早创建的等待房
+		if best == nil || room.CreatedAt.Before(best.CreatedAt) {
+			best = room
+		}
+	}
+	return best
+}
+
+func (m *Matchmaker) attachWaitingClientToRoomLocked(c *Client, room *Room) {
+	if c == nil || room == nil || room.Started {
+		return
+	}
+	for _, pid := range room.PlayerIDs {
+		if pid == c.ID {
+			c.State = StateWaiting
+			c.RoomID = room.ID
+			return
+		}
+	}
+	room.PlayerIDs = append(room.PlayerIDs, c.ID)
+	c.State = StateWaiting
+	c.RoomID = room.ID
+	log.Printf("[matchmaker] client %s joined waiting room=%s (%d/%d)", c.ID, room.ID, len(room.PlayerIDs), room.MaxPlayers)
+}
+
+func (m *Matchmaker) dequeueOneWaitingLocked() (string, bool) {
+	for i, id := range m.queue {
+		if c, ok := m.clients[id]; ok && c.State == StateWaiting {
+			delete(m.queueSet, id)
+			m.queue = append(m.queue[:i], m.queue[i+1:]...)
+			return id, true
+		}
+	}
+	return "", false
+}
+
+func (m *Matchmaker) cancelFromWaitingRoomLocked(id string) bool {
+	c, ok := m.clients[id]
+	if !ok || c.State != StateWaiting || c.RoomID == "" {
+		return false
+	}
+	room, ok := m.rooms[c.RoomID]
+	if !ok || room.Started {
+		return false
+	}
+	c.State = StateIdle
+	c.RoomID = ""
+	next := make([]string, 0, len(room.PlayerIDs))
+	for _, pid := range room.PlayerIDs {
+		if pid != id {
+			next = append(next, pid)
+		}
+	}
+	room.PlayerIDs = next
+	if room.OwnerID == id {
+		if len(room.PlayerIDs) > 0 {
+			room.OwnerID = room.PlayerIDs[0]
+		} else {
+			room.OwnerID = ""
+		}
+	}
+	if len(room.PlayerIDs) == 0 {
+		delete(m.rooms, room.ID)
+		log.Printf("[matchmaker] waiting room %s removed (empty)", room.ID)
+		return true
+	}
+	m.notifyRoomWaitingLocked(room)
+	return true
 }
 
 // validQueueLenLocked 统计队列中仍处于 Waiting 状态的有效人数
@@ -247,16 +446,35 @@ func (m *Matchmaker) validQueueLenLocked() int {
 
 // dequeueNLocked 从队头弹出最多 n 个有效（StateWaiting）的客户端 ID
 func (m *Matchmaker) dequeueNLocked(n int) []string {
+	// 关键修复：人数不足 n 时，不应消费队列。
+	// 旧逻辑会在只有 1 人时先把该玩家弹出，再因不足 2 人建房失败，
+	// 导致 matching 被错误清零（状态广播只剩 online）。
 	result := make([]string, 0, n)
-	newQueue := make([]string, 0, len(m.queue))
+	indices := make([]int, 0, n)
 
-	for _, id := range m.queue {
-		if len(result) < n {
-			if c, ok := m.clients[id]; ok && c.State == StateWaiting {
-				result = append(result, id)
-				delete(m.queueSet, id)
-				continue
-			}
+	for i, id := range m.queue {
+		if len(result) >= n {
+			break
+		}
+		if c, ok := m.clients[id]; ok && c.State == StateWaiting {
+			result = append(result, id)
+			indices = append(indices, i)
+		}
+	}
+
+	if len(result) < n {
+		return []string{}
+	}
+
+	remove := make(map[int]bool, len(indices))
+	for _, idx := range indices {
+		remove[idx] = true
+	}
+	newQueue := make([]string, 0, len(m.queue)-len(indices))
+	for i, id := range m.queue {
+		if remove[i] {
+			delete(m.queueSet, id)
+			continue
 		}
 		newQueue = append(newQueue, id)
 	}
@@ -404,7 +622,15 @@ func (m *Matchmaker) roomLiveMatchmakerPeersLocked(room *Room) int {
 
 func (m *Matchmaker) handleLeaveLocked(id string) {
 	c, ok := m.clients[id]
-	if !ok || c.State != StateInRoom {
+	if !ok {
+		return
+	}
+	// 等待房阶段离开：等同取消匹配
+	if c.State == StateWaiting && c.RoomID != "" {
+		m.cancelFromWaitingRoomLocked(id)
+		return
+	}
+	if c.State != StateInRoom {
 		return
 	}
 
@@ -464,11 +690,23 @@ func (m *Matchmaker) recycleRoomLocked(room *Room) {
 	log.Printf("[matchmaker] room %s recycled, port %d returned to pool (pool size=%d)", room.ID, room.Port, len(m.freePorts))
 }
 
-// broadcastStatusLocked 向所有已连接的客户端广播当前在线人数和匹配队列人数
+// broadcastStatusLocked 向所有已连接的客户端广播在线/匹配中/游戏中人数
 func (m *Matchmaker) broadcastStatusLocked() {
 	online := len(m.clients)
-	matching := len(m.queueSet)
-	msg := protocol.StatusMsg(online, matching)
+	matching := 0
+	inGame := 0
+	for _, c := range m.clients {
+		if c == nil {
+			continue
+		}
+		if c.State == StateWaiting {
+			// 匹配中包含：队列 + 等待房（未开局）
+			matching++
+		} else if c.State == StateInRoom {
+			inGame++
+		}
+	}
+	msg := protocol.StatusMsg(online, matching, inGame)
 	for _, c := range m.clients {
 		safeSend(c.Send, msg)
 	}
