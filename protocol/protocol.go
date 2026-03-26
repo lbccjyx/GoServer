@@ -3,6 +3,7 @@ package protocol
 import "encoding/json"
 
 const (
+	TypeVersionCheck = 0
 	TypeRequestMatch = 1
 	TypeCancelMatch  = 2
 	TypeLeaveRoom    = 3
@@ -13,23 +14,34 @@ const (
 )
 
 type ClientMessage struct {
-	Type int `json:"type"`
-	Num  int `json:"num,omitempty"`
+	Type    int    `json:"type"`
+	Num     int    `json:"num,omitempty"`
+	Version string `json:"version,omitempty"`
 }
 
 type ServerMessage struct {
-	Type         interface{} `json:"type"`
-	Num          int         `json:"num,omitempty"`
-	PlayerCount  int         `json:"player_count,omitempty"`  // 本局匹配到的人数（2~4），专服/UI 应用此值，勿把 Godot 的 server peer id=1 算成玩家
-	MaxPlayers   int         `json:"max_players,omitempty"`   // 房间最大人数（当前固定 4）
-	WaitSeconds  int         `json:"wait_seconds,omitempty"`  // 房间待开局剩余秒数（>=0）
-	RoomID       string      `json:"room_id,omitempty"`       // 匹配服房间号（等待阶段可用于日志）
-	RoomReady    *bool       `json:"room_ready,omitempty"`    // true 表示已满足开局条件
-	OK           *bool       `json:"ok,omitempty"`
-	Reason       string      `json:"reason,omitempty"`
-	Online       int         `json:"online,omitempty"`
-	Matching     int         `json:"matching,omitempty"`
-	InGame       int         `json:"in_game,omitempty"`
+	Type          interface{} `json:"type"`
+	ServerVersion string      `json:"server_version,omitempty"`
+	DownloadURL   string      `json:"download_url,omitempty"`
+	ErrorCode     string      `json:"error_code,omitempty"`
+	Num           int         `json:"num,omitempty"`
+	PlayerCount   int         `json:"player_count,omitempty"` // 本局匹配到的人数（2~4），专服/UI 应用此值，勿把 Godot 的 server peer id=1 算成玩家
+	MaxPlayers    int         `json:"max_players,omitempty"`  // 房间最大人数（当前固定 4）
+	WaitSeconds   int         `json:"wait_seconds,omitempty"` // 房间待开局剩余秒数（>=0）
+	RoomID        string      `json:"room_id,omitempty"`      // 匹配服房间号（等待阶段可用于日志）
+	RoomReady     *bool       `json:"room_ready,omitempty"`   // true 表示已满足开局条件
+	OK            *bool       `json:"ok,omitempty"`
+	Reason        string      `json:"reason,omitempty"`
+	Online        int         `json:"online,omitempty"`
+	Matching      int         `json:"matching,omitempty"`
+	InGame        int         `json:"in_game,omitempty"`
+}
+
+func VersionOKMsg(serverVersion string) []byte {
+	ok := true
+	msg := ServerMessage{Type: TypeVersionCheck, OK: &ok, ServerVersion: serverVersion}
+	b, _ := json.Marshal(msg)
+	return b
 }
 
 func ParseClientMessage(data []byte) (*ClientMessage, error) {
@@ -78,6 +90,18 @@ func RoomDissolvedMsg(reason string) []byte {
 
 func ErrorMsg(reason string) []byte {
 	msg := ServerMessage{Type: TypeError, Reason: reason}
+	b, _ := json.Marshal(msg)
+	return b
+}
+
+func ErrorVersionMismatch(reason, serverVersion, downloadURL string) []byte {
+	msg := ServerMessage{
+		Type:          TypeError,
+		Reason:        reason,
+		ErrorCode:     "version_mismatch",
+		ServerVersion: serverVersion,
+		DownloadURL:   downloadURL,
+	}
 	b, _ := json.Marshal(msg)
 	return b
 }

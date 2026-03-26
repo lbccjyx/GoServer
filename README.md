@@ -60,10 +60,19 @@ exec: "DedicatedServer.exe": cannot run executable found relative to current dir
 ## 构建与运行
 
 ```powershell
-cd d:\project\GoServer
+cd d:\software\GoDot\PrjA\GoServer
 go mod tidy
 go build -o matchserver.exe .
+go build -o http_download.exe ./http_download
+
 .\matchserver.exe
+```
+
+下载服务（HTTP 80 端口）单独运行：
+
+```powershell
+# 需要管理员权限（80 端口）
+.\http_download.exe
 ```
 
 开发调试：

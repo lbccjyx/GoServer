@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +16,12 @@ import (
 
 	"GoServer/matchmaker"
 	"GoServer/protocol"
+)
+
+const (
+	defaultServerVersion = "1.0.0"
+	clientVersionFile    = "ClientVersion.txt"
+	downloadURL          = "http://121.41.191.154/"
 )
 
 var upgrader = websocket.Upgrader{
@@ -80,6 +89,8 @@ func (s *Server) readPump(conn *websocket.Conn, sendCh chan []byte, client *matc
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		return nil
 	})
+	versionChecked := false
+	serverVersion := loadServerVersion()
 
 	for {
 		msgType, data, err := conn.ReadMessage()
@@ -100,6 +111,25 @@ func (s *Server) readPump(conn *websocket.Conn, sendCh chan []byte, client *matc
 			continue
 		}
 
+		if msg.Type == protocol.TypeVersionCheck {
+			if msg.Version != serverVersion {
+				safeSend(sendCh, protocol.ErrorVersionMismatch(
+					fmt.Sprintf("client version mismatch: client=%q server=%q", msg.Version, serverVersion),
+					serverVersion,
+					downloadURL,
+				))
+				return
+			}
+			versionChecked = true
+			safeSend(sendCh, protocol.VersionOKMsg(serverVersion))
+			continue
+		}
+
+		if !versionChecked {
+			safeSend(sendCh, protocol.ErrorMsg("version check required"))
+			return
+		}
+
 		switch msg.Type {
 		case protocol.TypeRequestMatch:
 			s.mm.RequestMatch(id)
@@ -113,6 +143,27 @@ func (s *Server) readPump(conn *websocket.Conn, sendCh chan []byte, client *matc
 			safeSend(sendCh, protocol.ErrorMsg(fmt.Sprintf("unknown type: %d", msg.Type)))
 		}
 	}
+}
+
+func loadServerVersion() string {
+	path := clientVersionFile
+	if exePath, err := os.Executable(); err == nil {
+		path = filepath.Join(filepath.Dir(exePath), clientVersionFile)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("[server] read %s failed, fallback to %s, err=%v", clientVersionFile, defaultServerVersion, err)
+		return defaultServerVersion
+	}
+
+	version := strings.TrimSpace(string(data))
+	if version == "" {
+		log.Printf("[server] %s is empty, fallback to %s", clientVersionFile, defaultServerVersion)
+		return defaultServerVersion
+	}
+
+	return version
 }
 
 func (s *Server) writePump(conn *websocket.Conn, sendCh chan []byte, id string) {
