@@ -21,6 +21,15 @@ type ClientMessage struct {
 	Name    string `json:"name,omitempty"`
 }
 
+// StatusRoom 等待房摘要，随 type=5 广播，供大厅内玩家看到可加入房间。
+type StatusRoom struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	PlayerCount int    `json:"player_count"`
+	MaxPlayers  int    `json:"max_players"`
+	WaitSeconds int    `json:"wait_seconds"`
+}
+
 type ServerMessage struct {
 	Type          interface{} `json:"type"`
 	ServerVersion string      `json:"server_version,omitempty"`
@@ -37,6 +46,7 @@ type ServerMessage struct {
 	Online        int         `json:"online,omitempty"`
 	Matching      int         `json:"matching,omitempty"`
 	InGame        int         `json:"in_game,omitempty"`
+	Rooms         []StatusRoom `json:"rooms,omitempty"`       // 未满且未开局的等待房列表（大厅 UI）
 	Name          string      `json:"name,omitempty"`
 	IPHash        string      `json:"ip_hash,omitempty"`
 }
@@ -110,8 +120,8 @@ func ErrorVersionMismatch(reason, serverVersion, downloadURL string) []byte {
 	return b
 }
 
-func StatusMsg(online, matching, inGame int) []byte {
-	msg := ServerMessage{Type: TypeStatus, Online: online, Matching: matching, InGame: inGame}
+func StatusMsg(online, matching, inGame int, rooms []StatusRoom) []byte {
+	msg := ServerMessage{Type: TypeStatus, Online: online, Matching: matching, InGame: inGame, Rooms: rooms}
 	b, _ := json.Marshal(msg)
 	return b
 }
@@ -169,7 +179,7 @@ func PlayerNameSavedMsg(name, ipHash string) []byte {
      "房主解散房间"  — 房主主动解散(type=4)
    - 说明：非房主发送 type=3 或他人断线**不再**向其余玩家推送解散（专服可能仍在运行）；仅「最后一人离开」时服端回收专服，通常不再向已无人连接端推送
 
-4. 状态广播        {"type": 5, "online": 10, "matching": 3, "in_game": 2}
+4. 状态广播        {"type": 5, "online": 10, "matching": 3, "in_game": 2, "rooms": [...]}
    - 在以下时机自动推送给所有已连接的客户端：
      · 有新客户端连接 / 断开
      · 有玩家加入 / 退出匹配队列
@@ -178,6 +188,7 @@ func PlayerNameSavedMsg(name, ipHash string) []byte {
    - online   = 当前总在线连接数
    - matching = 当前处于匹配阶段的人数（含队列 + 等待房）
    - in_game  = 当前已进入游戏中的人数（已分配专服并进入房内）
+   - rooms    = 未满且未开局(waiting)的房间列表；每项含 id、player_count、max_players、wait_seconds，供大厅展示「匹配中的房间」
 
 5. 错误消息        {"type": "error", "reason": "..."}
    - reason 取值：
@@ -207,7 +218,7 @@ Godot 客户端接入要点
   1. 使用 WebSocketPeer 连接 ws://127.0.0.1:8765/ws
   2. 发送/接收均为 JSON 字符串（put_packet / get_packet → UTF-8）
   3. 收到 type=1 后，用 num 连接专服；用 player_count 限制 UI 槽位数（避免把 server id=1 算成未连接玩家）
-  4. 收到 type=5 后，用 online / matching / in_game 更新 UI 显示
+  4. 收到 type=5 后，用 online / matching / in_game / rooms 更新 UI 显示
   5. 必须正确响应 Ping/Pong（Godot WebSocketPeer 默认支持）
   6. 断线重连后需重新发送 type=1 请求匹配（服务端不保留会话）
 */

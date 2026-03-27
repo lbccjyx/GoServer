@@ -2,6 +2,7 @@ package matchmaker
 
 import (
 	"log"
+	"time"
 
 	"GoServer/protocol"
 )
@@ -36,10 +37,10 @@ func (m *Matchmaker) Unregister(id string) {
 		roomID := c.RoomID
 		delete(m.clients, id)
 		log.Printf("[matchmaker] client %s ws closed (was in room %s)", id, roomID)
-		if room, ok := m.rooms[roomID]; ok && m.roomLiveMatchmakerPeersLocked(room) == 0 {
-			log.Printf("[matchmaker] room %s: no matchmaker clients left (ws), recycling dedicated server", roomID)
-			m.recycleRoomLocked(room)
+		if room, ok := m.rooms[roomID]; ok {
+			m.dissolveRoomIfSingletonOrEmptyLocked(room)
 		}
+		m.tryMatchLocked()
 		m.broadcastStatusLocked()
 		return
 	}
@@ -71,7 +72,27 @@ func (m *Matchmaker) broadcastStatusLocked() {
 			inGame++
 		}
 	}
-	msg := protocol.StatusMsg(online, matching, inGame)
+	rooms := make([]protocol.StatusRoom, 0)
+	for _, room := range m.rooms {
+		if room == nil || room.Started {
+			continue
+		}
+		if len(room.PlayerIDs) >= room.MaxPlayers {
+			continue
+		}
+		waitSec := int(time.Until(room.WaitUntil).Seconds())
+		if waitSec < 0 {
+			waitSec = 0
+		}
+		rooms = append(rooms, protocol.StatusRoom{
+			ID:          room.ID,
+			Name:        "匹配房间",
+			PlayerCount: len(room.PlayerIDs),
+			MaxPlayers:  room.MaxPlayers,
+			WaitSeconds: waitSec,
+		})
+	}
+	msg := protocol.StatusMsg(online, matching, inGame, rooms)
 	for _, c := range m.clients {
 		safeSend(c.Send, msg)
 	}

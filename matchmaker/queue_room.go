@@ -10,6 +10,7 @@ func (m *Matchmaker) LeaveRoom(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.handleLeaveLocked(id)
+	m.tryMatchLocked()
 	m.broadcastStatusLocked()
 }
 
@@ -126,6 +127,17 @@ func (m *Matchmaker) cancelFromWaitingRoomLocked(id string) bool {
 	if len(room.PlayerIDs) == 0 {
 		m.disposeWaitingRoomLocked(room)
 		log.Printf("[matchmaker] waiting room %s removed (empty)", room.ID)
+		return true
+	}
+	if len(room.PlayerIDs) == 1 {
+		lone := room.PlayerIDs[0]
+		if pc, ok := m.clients[lone]; ok {
+			safeSend(pc.Send, protocol.RoomDissolvedMsg(RoomDissolveTooFewPlayers))
+			pc.State = StateIdle
+			pc.RoomID = ""
+		}
+		m.disposeWaitingRoomLocked(room)
+		log.Printf("[matchmaker] waiting room %s dissolved (only 1 player left)", room.ID)
 		return true
 	}
 	m.notifyRoomWaitingLocked(room)

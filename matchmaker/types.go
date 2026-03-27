@@ -47,10 +47,12 @@ type Matchmaker struct {
 }
 
 const (
-	roomMinPlayers              = 2
-	roomMaxPlayers              = 4
-	roomWaitBeforeStart         = 10 * time.Second
+	roomMinPlayers               = 2
+	roomMaxPlayers               = 4
+	roomWaitBeforeStart          = 10 * time.Second
 	roomDedicatedWarmupBeforeEnd = 2 * time.Second // 倒计时第 8 秒（剩余 2 秒）起专服
+	// RoomDissolveTooFewPlayers 等待房仅剩一人或开局后匹配服侧仅剩一人时，被动解散原因文案。
+	RoomDissolveTooFewPlayers = "人数不足，房间已关闭"
 )
 
 func New() *Matchmaker {
