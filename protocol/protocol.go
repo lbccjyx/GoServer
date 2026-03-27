@@ -10,6 +10,7 @@ const (
 	TypeDissolveRoom = 4
 	TypeStatus       = 5
 	TypeRoomWaiting  = 6
+	TypePlayerName   = 7
 	TypeError        = "error"
 )
 
@@ -17,6 +18,7 @@ type ClientMessage struct {
 	Type    int    `json:"type"`
 	Num     int    `json:"num,omitempty"`
 	Version string `json:"version,omitempty"`
+	Name    string `json:"name,omitempty"`
 }
 
 type ServerMessage struct {
@@ -35,6 +37,8 @@ type ServerMessage struct {
 	Online        int         `json:"online,omitempty"`
 	Matching      int         `json:"matching,omitempty"`
 	InGame        int         `json:"in_game,omitempty"`
+	Name          string      `json:"name,omitempty"`
+	IPHash        string      `json:"ip_hash,omitempty"`
 }
 
 func VersionOKMsg(serverVersion string) []byte {
@@ -108,6 +112,13 @@ func ErrorVersionMismatch(reason, serverVersion, downloadURL string) []byte {
 
 func StatusMsg(online, matching, inGame int) []byte {
 	msg := ServerMessage{Type: TypeStatus, Online: online, Matching: matching, InGame: inGame}
+	b, _ := json.Marshal(msg)
+	return b
+}
+
+func PlayerNameSavedMsg(name, ipHash string) []byte {
+	ok := true
+	msg := ServerMessage{Type: TypePlayerName, OK: &ok, Name: name, IPHash: ipHash}
 	b, _ := json.Marshal(msg)
 	return b
 }

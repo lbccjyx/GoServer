@@ -99,6 +99,8 @@ go run .
 - `{"type":2,"ok":true}`：取消匹配确认
 - `{"type":4,"reason":"..."}`：房间解散
 - `{"type":5,"online":<n>,"matching":<n>}`：状态广播（大厅人数显示只读 `online`/`matching`）
+- `{"type":7,"name":"昵称"}`：写入当前连接 IP 对应昵称（内存 HashMap，临时存储）
+- `{"type":7}`：查询当前连接 IP 对应昵称；返回 `{"type":7,"ok":true,"name":"..."}`（可能为空）
 - `{"type":"error","reason":"..."}`：错误消息
 
 说明：

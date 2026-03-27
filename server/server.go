@@ -2,11 +2,16 @@ package server
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"unicode/utf8"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,10 +39,16 @@ type Server struct {
 	mm     *matchmaker.Matchmaker
 	server *http.Server
 	wg     sync.WaitGroup
+	mu     sync.Mutex
+	// 匹配服内存临时存储：按 IP 哈希保存最近一次昵称
+	nameByIPHash map[string]string
 }
 
 func New(addr string, mm *matchmaker.Matchmaker) *Server {
-	s := &Server{mm: mm}
+	s := &Server{
+		mm:           mm,
+		nameByIPHash: make(map[string]string),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
@@ -67,15 +78,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := fmt.Sprintf("client-%d", clientCounter.Add(1))
+	ipHash := hashIP(remoteIPOnly(r.RemoteAddr))
 	sendCh := make(chan []byte, 64)
 	client := s.mm.Register(id, sendCh)
 
 	s.wg.Add(2)
 	go s.writePump(conn, sendCh, id)
-	go s.readPump(conn, sendCh, client, id)
+	go s.readPump(conn, sendCh, client, id, ipHash)
 }
 
-func (s *Server) readPump(conn *websocket.Conn, sendCh chan []byte, client *matchmaker.Client, id string) {
+func (s *Server) readPump(conn *websocket.Conn, sendCh chan []byte, client *matchmaker.Client, id string, ipHash string) {
 	defer func() {
 		s.mm.Unregister(id)
 		close(sendCh)
@@ -139,6 +151,20 @@ func (s *Server) readPump(conn *websocket.Conn, sendCh chan []byte, client *matc
 			s.mm.LeaveRoom(id)
 		case protocol.TypeDissolveRoom:
 			s.mm.DissolveRoom(id)
+		case protocol.TypePlayerName:
+			name := sanitizePlayerName(msg.Name)
+			if name == "" {
+				// 空 name 视为查询当前 IP 对应昵称
+				s.mu.Lock()
+				existing := s.nameByIPHash[ipHash]
+				s.mu.Unlock()
+				safeSend(sendCh, protocol.PlayerNameSavedMsg(existing, ipHash))
+				continue
+			}
+			s.mu.Lock()
+			s.nameByIPHash[ipHash] = name
+			s.mu.Unlock()
+			safeSend(sendCh, protocol.PlayerNameSavedMsg(name, ipHash))
 		default:
 			safeSend(sendCh, protocol.ErrorMsg(fmt.Sprintf("unknown type: %d", msg.Type)))
 		}
@@ -201,4 +227,33 @@ func safeSend(ch chan []byte, data []byte) {
 	case ch <- data:
 	default:
 	}
+}
+
+var multiSpaceRE = regexp.MustCompile(`\s+`)
+
+func sanitizePlayerName(raw string) string {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return ""
+	}
+	name = multiSpaceRE.ReplaceAllString(name, " ")
+	const maxLen = 12
+	if utf8.RuneCountInString(name) > maxLen {
+		runes := []rune(name)
+		name = string(runes[:maxLen])
+	}
+	return name
+}
+
+func remoteIPOnly(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
+func hashIP(ip string) string {
+	sum := sha1.Sum([]byte(ip))
+	return hex.EncodeToString(sum[:8])
 }
