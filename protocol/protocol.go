@@ -23,32 +23,33 @@ type ClientMessage struct {
 
 // StatusRoom 等待房摘要，随 type=5 广播，供大厅内玩家看到可加入房间。
 type StatusRoom struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	PlayerCount int    `json:"player_count"`
-	MaxPlayers  int    `json:"max_players"`
-	WaitSeconds int    `json:"wait_seconds"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name,omitempty"`
+	PlayerCount int      `json:"player_count"`
+	MaxPlayers  int      `json:"max_players"`
+	WaitSeconds int      `json:"wait_seconds"`
+	PlayerNames []string `json:"player_names,omitempty"`
 }
 
 type ServerMessage struct {
-	Type          interface{} `json:"type"`
-	ServerVersion string      `json:"server_version,omitempty"`
-	DownloadURL   string      `json:"download_url,omitempty"`
-	ErrorCode     string      `json:"error_code,omitempty"`
-	Num           int         `json:"num,omitempty"`
-	PlayerCount   int         `json:"player_count,omitempty"` // 本局匹配到的人数（2~4），专服/UI 应用此值，勿把 Godot 的 server peer id=1 算成玩家
-	MaxPlayers    int         `json:"max_players,omitempty"`  // 房间最大人数（当前固定 4）
-	WaitSeconds   int         `json:"wait_seconds,omitempty"` // 房间待开局剩余秒数（>=0）
-	RoomID        string      `json:"room_id,omitempty"`      // 匹配服房间号（等待阶段可用于日志）
-	RoomReady     *bool       `json:"room_ready,omitempty"`   // true 表示已满足开局条件
-	OK            *bool       `json:"ok,omitempty"`
-	Reason        string      `json:"reason,omitempty"`
-	Online        int         `json:"online,omitempty"`
-	Matching      int         `json:"matching,omitempty"`
-	InGame        int         `json:"in_game,omitempty"`
-	Rooms         []StatusRoom `json:"rooms,omitempty"`       // 未满且未开局的等待房列表（大厅 UI）
-	Name          string      `json:"name,omitempty"`
-	IPHash        string      `json:"ip_hash,omitempty"`
+	Type          interface{}  `json:"type"`
+	ServerVersion string       `json:"server_version,omitempty"`
+	DownloadURL   string       `json:"download_url,omitempty"`
+	ErrorCode     string       `json:"error_code,omitempty"`
+	Num           int          `json:"num,omitempty"`
+	PlayerCount   int          `json:"player_count,omitempty"` // 本局匹配到的人数（2~4），专服/UI 应用此值，勿把 Godot 的 server peer id=1 算成玩家
+	MaxPlayers    int          `json:"max_players,omitempty"`  // 房间最大人数（当前固定 4）
+	WaitSeconds   int          `json:"wait_seconds,omitempty"` // 房间待开局剩余秒数（>=0）
+	RoomID        string       `json:"room_id,omitempty"`      // 匹配服房间号（等待阶段可用于日志）
+	RoomReady     *bool        `json:"room_ready,omitempty"`   // true 表示已满足开局条件
+	OK            *bool        `json:"ok,omitempty"`
+	Reason        string       `json:"reason,omitempty"`
+	Online        int          `json:"online,omitempty"`
+	Matching      int          `json:"matching,omitempty"`
+	InGame        int          `json:"in_game,omitempty"`
+	Rooms         []StatusRoom `json:"rooms,omitempty"` // 未满且未开局的等待房列表（大厅 UI）
+	Name          string       `json:"name,omitempty"`
+	IPHash        string       `json:"ip_hash,omitempty"`
 }
 
 func VersionOKMsg(serverVersion string) []byte {

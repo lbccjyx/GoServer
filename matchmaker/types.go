@@ -15,23 +15,24 @@ const (
 )
 
 type Client struct {
-	ID     string
-	Send   chan []byte
-	State  ClientState
-	RoomID string
+	ID          string
+	Send        chan []byte
+	State       ClientState
+	RoomID      string
+	DisplayName string
 }
 
 // Room 匹配房间；等待阶段也可能已分配端口并启动专服（第 8 秒预热）。
 type Room struct {
-	ID                    string
-	OwnerID               string
-	PlayerIDs             []string
-	Port                  int
-	MaxPlayers            int
-	CreatedAt             time.Time
-	WaitUntil             time.Time
-	Started               bool
-	Process               *exec.Cmd
+	ID                       string
+	OwnerID                  string
+	PlayerIDs                []string
+	Port                     int
+	MaxPlayers               int
+	CreatedAt                time.Time
+	WaitUntil                time.Time
+	Started                  bool
+	Process                  *exec.Cmd
 	dedicatedStartInProgress bool
 }
 

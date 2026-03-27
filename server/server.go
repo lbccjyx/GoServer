@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
+	"encoding/gob"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -11,11 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"unicode/utf8"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 
@@ -26,6 +28,7 @@ import (
 const (
 	defaultServerVersion = "1.0.0"
 	clientVersionFile    = "ClientVersion.txt"
+	nameStoreFile        = "name_store.bin"
 	downloadURL          = "http://121.41.191.154/"
 )
 
@@ -41,14 +44,18 @@ type Server struct {
 	wg     sync.WaitGroup
 	mu     sync.Mutex
 	// 匹配服内存临时存储：按 IP 哈希保存最近一次昵称
-	nameByIPHash map[string]string
+	nameByIPHash  map[string]string
+	nameStorePath string
 }
 
 func New(addr string, mm *matchmaker.Matchmaker) *Server {
+	storePath := resolveNameStorePath()
 	s := &Server{
-		mm:           mm,
-		nameByIPHash: make(map[string]string),
+		mm:            mm,
+		nameByIPHash:  make(map[string]string),
+		nameStorePath: storePath,
 	}
+	s.loadNameStore()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
@@ -67,6 +74,7 @@ func (s *Server) Start() error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	log.Println("[server] shutting down...")
+	s.saveNameStore()
 	return s.server.Shutdown(ctx)
 }
 
@@ -81,6 +89,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ipHash := hashIP(remoteIPOnly(r.RemoteAddr))
 	sendCh := make(chan []byte, 64)
 	client := s.mm.Register(id, sendCh)
+	s.mu.Lock()
+	existingName := s.nameByIPHash[ipHash]
+	s.mu.Unlock()
+	if existingName != "" {
+		s.mm.SetClientDisplayName(id, existingName)
+	}
 
 	s.wg.Add(2)
 	go s.writePump(conn, sendCh, id)
@@ -158,12 +172,14 @@ func (s *Server) readPump(conn *websocket.Conn, sendCh chan []byte, client *matc
 				s.mu.Lock()
 				existing := s.nameByIPHash[ipHash]
 				s.mu.Unlock()
+				s.mm.SetClientDisplayName(id, existing)
 				safeSend(sendCh, protocol.PlayerNameSavedMsg(existing, ipHash))
 				continue
 			}
 			s.mu.Lock()
 			s.nameByIPHash[ipHash] = name
 			s.mu.Unlock()
+			s.mm.SetClientDisplayName(id, name)
 			safeSend(sendCh, protocol.PlayerNameSavedMsg(name, ipHash))
 		default:
 			safeSend(sendCh, protocol.ErrorMsg(fmt.Sprintf("unknown type: %d", msg.Type)))
@@ -256,4 +272,52 @@ func remoteIPOnly(remoteAddr string) string {
 func hashIP(ip string) string {
 	sum := sha1.Sum([]byte(ip))
 	return hex.EncodeToString(sum[:8])
+}
+
+func resolveNameStorePath() string {
+	if exePath, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(exePath), nameStoreFile)
+	}
+	return nameStoreFile
+}
+
+func (s *Server) loadNameStore() {
+	data, err := os.ReadFile(s.nameStorePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[server] load name store failed: %v", err)
+		}
+		return
+	}
+	var saved map[string]string
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&saved); err != nil {
+		log.Printf("[server] decode name store failed: %v", err)
+		return
+	}
+	if saved == nil {
+		return
+	}
+	s.nameByIPHash = saved
+	log.Printf("[server] loaded %d nickname records from %s", len(saved), s.nameStorePath)
+}
+
+func (s *Server) saveNameStore() {
+	s.mu.Lock()
+	snapshot := make(map[string]string, len(s.nameByIPHash))
+	for k, v := range s.nameByIPHash {
+		snapshot[k] = v
+	}
+	s.mu.Unlock()
+
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(snapshot); err != nil {
+		log.Printf("[server] encode name store failed: %v", err)
+		return
+	}
+	if err := os.WriteFile(s.nameStorePath, buf.Bytes(), 0o644); err != nil {
+		log.Printf("[server] save name store failed: %v", err)
+		return
+	}
+	log.Printf("[server] saved %d nickname records to %s", len(snapshot), s.nameStorePath)
 }

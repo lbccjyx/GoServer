@@ -84,12 +84,25 @@ func (m *Matchmaker) broadcastStatusLocked() {
 		if waitSec < 0 {
 			waitSec = 0
 		}
+		playerNames := make([]string, 0, len(room.PlayerIDs))
+		for _, pid := range room.PlayerIDs {
+			pc, ok := m.clients[pid]
+			if !ok {
+				continue
+			}
+			if pc.DisplayName != "" {
+				playerNames = append(playerNames, pc.DisplayName)
+			} else {
+				playerNames = append(playerNames, "玩家")
+			}
+		}
 		rooms = append(rooms, protocol.StatusRoom{
 			ID:          room.ID,
 			Name:        "匹配房间",
 			PlayerCount: len(room.PlayerIDs),
 			MaxPlayers:  room.MaxPlayers,
 			WaitSeconds: waitSec,
+			PlayerNames: playerNames,
 		})
 	}
 	msg := protocol.StatusMsg(online, matching, inGame, rooms)
