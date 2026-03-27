@@ -11,14 +11,16 @@ const (
 	TypeStatus       = 5
 	TypeRoomWaiting  = 6
 	TypePlayerName   = 7
+	TypePlayerTurret = 8
 	TypeError        = "error"
 )
 
 type ClientMessage struct {
-	Type    int    `json:"type"`
-	Num     int    `json:"num,omitempty"`
-	Version string `json:"version,omitempty"`
-	Name    string `json:"name,omitempty"`
+	Type          int    `json:"type"`
+	Num           int    `json:"num,omitempty"`
+	Version       string `json:"version,omitempty"`
+	Name          string `json:"name,omitempty"`
+	TurretStyleID int    `json:"turret_style_id,omitempty"`
 }
 
 // StatusRoom 等待房摘要，随 type=5 广播，供大厅内玩家看到可加入房间。
@@ -50,6 +52,7 @@ type ServerMessage struct {
 	Rooms         []StatusRoom `json:"rooms,omitempty"` // 未满且未开局的等待房列表（大厅 UI）
 	Name          string       `json:"name,omitempty"`
 	IPHash        string       `json:"ip_hash,omitempty"`
+	TurretStyleID int          `json:"turret_style_id,omitempty"`
 }
 
 func VersionOKMsg(serverVersion string) []byte {
@@ -130,6 +133,18 @@ func StatusMsg(online, matching, inGame int, rooms []StatusRoom) []byte {
 func PlayerNameSavedMsg(name, ipHash string) []byte {
 	ok := true
 	msg := ServerMessage{Type: TypePlayerName, OK: &ok, Name: name, IPHash: ipHash}
+	b, _ := json.Marshal(msg)
+	return b
+}
+
+func PlayerTurretSavedMsg(turretStyleID int, ipHash string) []byte {
+	ok := true
+	msg := ServerMessage{
+		Type:          TypePlayerTurret,
+		OK:            &ok,
+		TurretStyleID: turretStyleID,
+		IPHash:        ipHash,
+	}
 	b, _ := json.Marshal(msg)
 	return b
 }

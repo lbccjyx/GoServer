@@ -106,6 +106,8 @@ func (m *Matchmaker) broadcastStatusLocked() {
 		})
 	}
 	msg := protocol.StatusMsg(online, matching, inGame, rooms)
+	// log.Printf("[MatchRoomList][Go] broadcast status online=%d matching=%d in_game=%d rooms_count=%d rooms=%+v",
+	//	online, matching, inGame, len(rooms), rooms)
 	for _, c := range m.clients {
 		safeSend(c.Send, msg)
 	}

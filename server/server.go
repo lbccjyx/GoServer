@@ -44,16 +44,18 @@ type Server struct {
 	wg     sync.WaitGroup
 	mu     sync.Mutex
 	// 匹配服内存临时存储：按 IP 哈希保存最近一次昵称
-	nameByIPHash  map[string]string
-	nameStorePath string
+	nameByIPHash   map[string]string
+	turretByIPHash map[string]int
+	nameStorePath  string
 }
 
 func New(addr string, mm *matchmaker.Matchmaker) *Server {
 	storePath := resolveNameStorePath()
 	s := &Server{
-		mm:            mm,
-		nameByIPHash:  make(map[string]string),
-		nameStorePath: storePath,
+		mm:             mm,
+		nameByIPHash:   make(map[string]string),
+		turretByIPHash: make(map[string]int),
+		nameStorePath:  storePath,
 	}
 	s.loadNameStore()
 
@@ -95,13 +97,26 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if existingName != "" {
 		s.mm.SetClientDisplayName(id, existingName)
 	}
+	s.mu.Lock()
+	existingTurret := s.turretByIPHash[ipHash]
+	s.mu.Unlock()
+	if existingTurret <= 0 {
+		existingTurret = 6
+	}
 
 	s.wg.Add(2)
 	go s.writePump(conn, sendCh, id)
-	go s.readPump(conn, sendCh, client, id, ipHash)
+	go s.readPump(conn, sendCh, client, id, ipHash, existingTurret)
 }
 
-func (s *Server) readPump(conn *websocket.Conn, sendCh chan []byte, client *matchmaker.Client, id string, ipHash string) {
+func (s *Server) readPump(
+	conn *websocket.Conn,
+	sendCh chan []byte,
+	client *matchmaker.Client,
+	id string,
+	ipHash string,
+	_ int,
+) {
 	defer func() {
 		s.mm.Unregister(id)
 		close(sendCh)
@@ -179,8 +194,26 @@ func (s *Server) readPump(conn *websocket.Conn, sendCh chan []byte, client *matc
 			s.mu.Lock()
 			s.nameByIPHash[ipHash] = name
 			s.mu.Unlock()
+			s.saveNameStore()
 			s.mm.SetClientDisplayName(id, name)
 			safeSend(sendCh, protocol.PlayerNameSavedMsg(name, ipHash))
+		case protocol.TypePlayerTurret:
+			styleID := clampTurretStyle(msg.TurretStyleID)
+			if msg.TurretStyleID == 0 {
+				s.mu.Lock()
+				existing := s.turretByIPHash[ipHash]
+				s.mu.Unlock()
+				if existing <= 0 {
+					existing = 6
+				}
+				safeSend(sendCh, protocol.PlayerTurretSavedMsg(existing, ipHash))
+				continue
+			}
+			s.mu.Lock()
+			s.turretByIPHash[ipHash] = styleID
+			s.mu.Unlock()
+			s.saveNameStore()
+			safeSend(sendCh, protocol.PlayerTurretSavedMsg(styleID, ipHash))
 		default:
 			safeSend(sendCh, protocol.ErrorMsg(fmt.Sprintf("unknown type: %d", msg.Type)))
 		}
@@ -261,6 +294,16 @@ func sanitizePlayerName(raw string) string {
 	return name
 }
 
+func clampTurretStyle(v int) int {
+	if v < 1 {
+		return 1
+	}
+	if v > 7 {
+		return 7
+	}
+	return v
+}
+
 func remoteIPOnly(remoteAddr string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
@@ -289,23 +332,47 @@ func (s *Server) loadNameStore() {
 		}
 		return
 	}
-	var saved map[string]string
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&saved); err != nil {
-		log.Printf("[server] decode name store failed: %v", err)
+	type profileRecord struct {
+		Name          string
+		TurretStyleID int
+	}
+	var saved map[string]profileRecord
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&saved); err == nil && saved != nil {
+		names := make(map[string]string, len(saved))
+		turrets := make(map[string]int, len(saved))
+		for k, v := range saved {
+			names[k] = v.Name
+			turrets[k] = clampTurretStyle(v.TurretStyleID)
+		}
+		s.nameByIPHash = names
+		s.turretByIPHash = turrets
+		log.Printf("[server] loaded %d profile records from %s", len(saved), s.nameStorePath)
 		return
 	}
-	if saved == nil {
+	var oldSaved map[string]string
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&oldSaved); err == nil && oldSaved != nil {
+		s.nameByIPHash = oldSaved
+		for k := range oldSaved {
+			s.turretByIPHash[k] = 6
+		}
+		log.Printf("[server] loaded %d legacy nickname records from %s", len(oldSaved), s.nameStorePath)
 		return
 	}
-	s.nameByIPHash = saved
-	log.Printf("[server] loaded %d nickname records from %s", len(saved), s.nameStorePath)
+	log.Printf("[server] decode name store failed")
 }
 
 func (s *Server) saveNameStore() {
 	s.mu.Lock()
-	snapshot := make(map[string]string, len(s.nameByIPHash))
+	type profileRecord struct {
+		Name          string
+		TurretStyleID int
+	}
+	snapshot := make(map[string]profileRecord, len(s.nameByIPHash))
 	for k, v := range s.nameByIPHash {
-		snapshot[k] = v
+		snapshot[k] = profileRecord{
+			Name:          v,
+			TurretStyleID: clampTurretStyle(s.turretByIPHash[k]),
+		}
 	}
 	s.mu.Unlock()
 
@@ -319,5 +386,5 @@ func (s *Server) saveNameStore() {
 		log.Printf("[server] save name store failed: %v", err)
 		return
 	}
-	log.Printf("[server] saved %d nickname records to %s", len(snapshot), s.nameStorePath)
+	log.Printf("[server] saved %d profile records to %s", len(snapshot), s.nameStorePath)
 }
