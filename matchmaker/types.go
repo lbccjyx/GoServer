@@ -15,11 +15,12 @@ const (
 )
 
 type Client struct {
-	ID          string
-	Send        chan []byte
-	State       ClientState
-	RoomID      string
-	DisplayName string
+	ID            string
+	Send          chan []byte
+	State         ClientState
+	RoomID        string
+	DisplayName   string
+	TurretStyleID int // 1~7，与 Godot GameTextures.TURRET_STYLE_* 一致
 }
 
 // Room 匹配房间；等待阶段也可能已分配端口并启动专服（第 8 秒预热）。

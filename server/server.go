@@ -90,7 +90,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	id := fmt.Sprintf("client-%d", clientCounter.Add(1))
 	ipHash := hashIP(remoteIPOnly(r.RemoteAddr))
 	sendCh := make(chan []byte, 64)
-	client := s.mm.Register(id, sendCh)
+	s.mm.Register(id, sendCh)
 	s.mu.Lock()
 	existingName := s.nameByIPHash[ipHash]
 	s.mu.Unlock()
@@ -103,19 +103,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if existingTurret <= 0 {
 		existingTurret = 6
 	}
+	s.mm.SetClientTurretStyle(id, clampTurretStyle(existingTurret))
 
 	s.wg.Add(2)
 	go s.writePump(conn, sendCh, id)
-	go s.readPump(conn, sendCh, client, id, ipHash, existingTurret)
+	go s.readPump(conn, sendCh, id, ipHash)
 }
 
 func (s *Server) readPump(
 	conn *websocket.Conn,
 	sendCh chan []byte,
-	client *matchmaker.Client,
 	id string,
 	ipHash string,
-	_ int,
 ) {
 	defer func() {
 		s.mm.Unregister(id)
@@ -198,7 +197,6 @@ func (s *Server) readPump(
 			s.mm.SetClientDisplayName(id, name)
 			safeSend(sendCh, protocol.PlayerNameSavedMsg(name, ipHash))
 		case protocol.TypePlayerTurret:
-			styleID := clampTurretStyle(msg.TurretStyleID)
 			if msg.TurretStyleID == 0 {
 				s.mu.Lock()
 				existing := s.turretByIPHash[ipHash]
@@ -206,13 +204,17 @@ func (s *Server) readPump(
 				if existing <= 0 {
 					existing = 6
 				}
+				existing = clampTurretStyle(existing)
+				s.mm.SetClientTurretStyle(id, existing)
 				safeSend(sendCh, protocol.PlayerTurretSavedMsg(existing, ipHash))
 				continue
 			}
+			styleID := clampTurretStyle(msg.TurretStyleID)
 			s.mu.Lock()
 			s.turretByIPHash[ipHash] = styleID
 			s.mu.Unlock()
 			s.saveNameStore()
+			s.mm.SetClientTurretStyle(id, styleID)
 			safeSend(sendCh, protocol.PlayerTurretSavedMsg(styleID, ipHash))
 		default:
 			safeSend(sendCh, protocol.ErrorMsg(fmt.Sprintf("unknown type: %d", msg.Type)))
